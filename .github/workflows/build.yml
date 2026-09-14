@@ -16,6 +16,9 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Create local.properties
+        run: echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" > local.properties
+
       - name: Setup Gradle Wrapper
         run: gradle wrapper --gradle-version 8.7
 

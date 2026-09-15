@@ -1,9 +1,13 @@
 package com.clinton.friday
 
+import android.Manifest
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.database.sqlite.SQLiteDatabase
 import android.net.Uri
 import android.os.Bundle
+import android.provider.ContactsContract
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -18,7 +22,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.room.Room
 import com.clinton.friday.data.*
 import kotlinx.coroutines.Dispatchers
@@ -31,6 +37,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
 class MainActivity : ComponentActivity() {
@@ -53,10 +60,12 @@ class MainActivity : ComponentActivity() {
 const val CAPABILITIES = """What you can actually do right now (this is an early, in-progress rebuild of you as a real Android app):
 - Talk and hold a conversation
 - Remember past conversations, permanently, across app opens, including recalling further back when needed
+- Send WhatsApp messages to Clinton's real phone contacts (Clinton still has to tap Send once, that last step isn't automated yet)
 
 What you cannot do yet (be honest about this, don't pretend otherwise):
-- You cannot yet send WhatsApp messages or place phone calls in this app version
+- You cannot yet place phone calls in this app version
 - You cannot play music, open apps, browse a live screen, or generate/edit images
+- You cannot research topics or browse the internet yet
 
 If Clinton asks what you can do, answer honestly from this list. Don't claim abilities you don't have yet, even if you remember having them in an older version."""
 
@@ -66,11 +75,82 @@ Speak only in English by default. Do not use Igbo or any other language unless C
 
 You have light opinions and can disagree. If unsure what they mean, ask instead of guessing. You always respect Clinton's control over you. Keep replies conversational, not long.
 
-IMPORTANT: Some messages in your memory history were imported from an older version of you that could call and text contacts. That old version no longer applies. In THIS current app, you cannot call or text yet - never claim, confirm, or repeat that you just made a call or sent a text, even if old memory messages describe it happening.
+IMPORTANT: Some messages in your memory history were imported from an older version of you. That old version could do things (like phone calls) this current app version cannot yet. Only claim abilities listed in your capabilities below - never claim or confirm an action from your capability list's "cannot do" section, even if old memory messages describe it happening.
 $CAPABILITIES"""
 
 const val DEFAULT_HISTORY_LIMIT = 15
 const val DEEP_HISTORY_LIMIT = 100000
+
+data class Contact(val name: String, val number: String)
+
+fun getAllContacts(context: Context): List<Contact> {
+    val contacts = mutableListOf<Contact>()
+    val resolver = context.contentResolver
+    val cursor = resolver.query(
+        ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+        arrayOf(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER),
+        null, null, null
+    )
+    cursor?.use {
+        val nameIdx = it.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+        val numberIdx = it.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
+        while (it.moveToNext()) {
+            val name = it.getString(nameIdx) ?: continue
+            val number = it.getString(numberIdx) ?: continue
+            contacts.add(Contact(name, number))
+        }
+    }
+    return contacts
+}
+
+fun levenshtein(a: String, b: String): Int {
+    val dp = Array(a.length + 1) { IntArray(b.length + 1) }
+    for (i in 0..a.length) dp[i][0] = i
+    for (j in 0..b.length) dp[0][j] = j
+    for (i in 1..a.length) {
+        for (j in 1..b.length) {
+            dp[i][j] = if (a[i - 1] == b[j - 1]) dp[i - 1][j - 1]
+            else 1 + minOf(dp[i - 1][j - 1], dp[i - 1][j], dp[i][j - 1])
+        }
+    }
+    return dp[a.length][b.length]
+}
+
+fun similarity(a: String, b: String): Double {
+    val s1 = a.lowercase().trim()
+    val s2 = b.lowercase().trim()
+    if (s1 == s2) return 1.0
+    if (s2.contains(s1) || s1.contains(s2)) return 0.9
+    val longer = if (s1.length > s2.length) s1 else s2
+    val shorter = if (s1.length > s2.length) s2 else s1
+    if (longer.isEmpty()) return 1.0
+    val dist = levenshtein(longer, shorter)
+    return (longer.length - dist) / longer.length.toDouble()
+}
+
+fun findMatchingContacts(query: String, contacts: List<Contact>): List<Contact> {
+    val scored = contacts.map { it to similarity(query, it.name) }
+        .filter { it.second > 0.35 }
+        .sortedByDescending { it.second }
+    if (scored.isEmpty()) return emptyList()
+    if (scored.size == 1) return listOf(scored[0].first)
+    val topScore = scored[0].second
+    val secondScore = scored.getOrNull(1)?.second ?: 0.0
+    return if (topScore - secondScore >= 0.15) {
+        listOf(scored[0].first)
+    } else {
+        scored.filter { topScore - it.second < 0.2 }.take(5).map { it.first }
+    }
+}
+
+fun openWhatsApp(context: Context, number: String, message: String) {
+    val digits = number.filter { it.isDigit() || it == '+' }
+    val encodedMessage = URLEncoder.encode(message, "UTF-8")
+    val url = "https://wa.me/$digits?text=$encodedMessage"
+    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    context.startActivity(intent)
+}
 
 suspend fun importOldDatabase(context: Context, uri: Uri, dao: FridayDao) {
     val tempFile = File(context.cacheDir, "import_temp.db")
@@ -162,6 +242,26 @@ Answer with ONLY one word: yes or no."""
     return raw != null && raw.trim().lowercase().startsWith("yes")
 }
 
+data class TextCommandResult(val isTextCommand: Boolean, val name: String?, val message: String?)
+
+fun detectTextCommand(userMessage: String): TextCommandResult {
+    val prompt = """Clinton just said this to Friday: "$userMessage"
+
+Is Clinton asking Friday to send a WhatsApp message/text to someone? This includes casual phrasing like "text X that...", "tell X...", "let X know...", "message X saying...".
+
+If YES, respond with ONLY this exact format, nothing else:
+YES|contact_name|message_to_send
+
+Where message_to_send is rewritten in natural first-person, as if Clinton is speaking directly to that contact (not describing it in third person).
+
+If NO, respond with ONLY the word: NO"""
+    val raw = callGemini(prompt)?.trim() ?: return TextCommandResult(false, null, null)
+    if (!raw.startsWith("YES", ignoreCase = true)) return TextCommandResult(false, null, null)
+    val parts = raw.split("|", limit = 3)
+    if (parts.size < 3) return TextCommandResult(false, null, null)
+    return TextCommandResult(true, parts[1].trim(), parts[2].trim())
+}
+
 fun askFriday(message: String, historyContext: String, prefsContext: String): String {
     var systemPrompt = SYSTEM_PROMPT
     if (prefsContext.isNotBlank()) {
@@ -174,7 +274,7 @@ fun askFriday(message: String, historyContext: String, prefsContext: String): St
 
 @Composable
 fun AppRoot(dao: FridayDao) {
-    val context = androidx.compose.ui.platform.LocalContext.current
+    val context = LocalContext.current
     val prefs = context.getSharedPreferences("friday_prefs", Context.MODE_PRIVATE)
     var imported by remember { mutableStateOf(prefs.getBoolean("imported", false)) }
     val scope = rememberCoroutineScope()
@@ -216,11 +316,29 @@ fun ImportScreen(onPick: (Uri) -> Unit, onSkip: () -> Unit) {
 
 @Composable
 fun ChatScreen(dao: FridayDao) {
+    val context = LocalContext.current
     val messages = remember { mutableStateListOf<String>() }
     var input by remember { mutableStateOf("") }
     var thinking by remember { mutableStateOf(false) }
+    var pendingContacts by remember { mutableStateOf<List<Contact>?>(null) }
+    var pendingMessage by remember { mutableStateOf<String?>(null) }
+    var hasContactsPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
+        )
+    }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        hasContactsPermission = granted
+    }
+
+    LaunchedEffect(Unit) {
+        if (!hasContactsPermission) {
+            permissionLauncher.launch(Manifest.permission.READ_CONTACTS)
+        }
+    }
 
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
@@ -236,6 +354,21 @@ fun ChatScreen(dao: FridayDao) {
             history.forEach { m ->
                 val speaker = if (m.role == "user") "You" else "Friday"
                 messages.add("$speaker: ${m.content}")
+            }
+        }
+    }
+
+    fun saveAndShow(userMsg: String?, fridayMsg: String) {
+        scope.launch {
+            if (userMsg != null) {
+                messages.add("You: $userMsg")
+                withContext(Dispatchers.IO) {
+                    dao.insertMessage(MessageEntity(role = "user", content = userMsg, timestamp = System.currentTimeMillis().toString()))
+                }
+            }
+            messages.add("Friday: $fridayMsg")
+            withContext(Dispatchers.IO) {
+                dao.insertMessage(MessageEntity(role = "assistant", content = fridayMsg, timestamp = System.currentTimeMillis().toString()))
             }
         }
     }
@@ -261,37 +394,55 @@ fun ChatScreen(dao: FridayDao) {
             Button(onClick = {
                 if (input.isNotBlank()) {
                     val userMessage = input
-                    messages.add("You: $userMessage")
                     input = ""
-                    thinking = true
+                    messages.add("You: $userMessage")
+
                     scope.launch {
-                        val timestamp = System.currentTimeMillis().toString()
                         withContext(Dispatchers.IO) {
-                            dao.insertMessage(MessageEntity(role = "user", content = userMessage, timestamp = timestamp))
+                            dao.insertMessage(MessageEntity(role = "user", content = userMessage, timestamp = System.currentTimeMillis().toString()))
                         }
 
-                        val deep = withContext(Dispatchers.IO) { needsDeepRecall(userMessage) }
-                        val limit = if (deep) DEEP_HISTORY_LIMIT else DEFAULT_HISTORY_LIMIT
+                        val currentPending = pendingContacts
+                        val currentPendingMsg = pendingMessage
 
-                        val historyRows = withContext(Dispatchers.IO) { dao.getRecentMessages(limit).reversed() }
-                        val historyContext = historyRows.joinToString("\n") { m ->
-                            val speaker = if (m.role == "user") "Clinton" else "Friday"
-                            "$speaker: ${m.content}"
-                        }
-                        val prefsRows = withContext(Dispatchers.IO) { dao.getAllPreferences() }
-                        val prefsContext = prefsRows.joinToString("\n") { "- ${it.instruction}" }
+                        if (currentPending != null && currentPendingMsg != null) {
+                            val choice = userMessage.trim()
+                            val index = choice.toIntOrNull()
+                            val chosen = if (index != null && index in 1..currentPending.size) {
+                                currentPending[index - 1]
+                            } else {
+                                currentPending.firstOrNull { it.name.lowercase().contains(choice.lowercase()) }
+                            }
 
-                        val reply = withContext(Dispatchers.IO) { askFriday(userMessage, historyContext, prefsContext) }
-                        thinking = false
-                        messages.add("Friday: $reply")
-                        withContext(Dispatchers.IO) {
-                            dao.insertMessage(MessageEntity(role = "assistant", content = reply, timestamp = System.currentTimeMillis().toString()))
+                            pendingContacts = null
+                            pendingMessage = null
+
+                            if (chosen != null) {
+                                if (!hasContactsPermission) {
+                                    val reply = "I need contacts permission to do that, boss. Try allowing it in your phone settings."
+                                    messages.add("Friday: $reply")
+                                    withContext(Dispatchers.IO) {
+                                        dao.insertMessage(MessageEntity(role = "assistant", content = reply, timestamp = System.currentTimeMillis().toString()))
+                                    }
+                                } else {
+                                    openWhatsApp(context, chosen.number, currentPendingMsg)
+                                    val reply = "Opened WhatsApp for ${chosen.name} with your message ready \u2014 just tap send."
+                                    messages.add("Friday: $reply")
+                                    withContext(Dispatchers.IO) {
+                                        dao.insertMessage(MessageEntity(role = "assistant", content = reply, timestamp = System.currentTimeMillis().toString()))
+                                    }
+                                }
+                            } else {
+                                val reply = "Didn't catch which one you meant, boss. Want to try naming the contact again?"
+                                messages.add("Friday: $reply")
+                                withContext(Dispatchers.IO) {
+                                    dao.insertMessage(MessageEntity(role = "assistant", content = reply, timestamp = System.currentTimeMillis().toString()))
+                                }
+                            }
+                            return@launch
                         }
-                    }
-                }
-            }) {
-                Text("Send")
-            }
-        }
-    }
-}
+
+                        thinking = true
+                        val textCommand = withContext(Dispatchers.IO) { detectTextCommand(userMessage) }
+
+                        if (textCommand.isTextCommand && textCommand.name != null && textCommand

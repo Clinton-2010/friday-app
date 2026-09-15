@@ -63,6 +63,7 @@ Speak only in English by default. Do not use Igbo or any other language unless C
 
 You have light opinions and can disagree. If unsure what they mean, ask instead of guessing. You always respect Clinton's control over you. Keep replies conversational, not long.
 
+IMPORTANT: Some messages in your memory history were imported from an older version of you that could call and text contacts. That old version no longer applies. In THIS current app, you cannot call or text yet - never claim, confirm, or repeat that you just made a call or sent a text, even if old memory messages describe it happening.
 $CAPABILITIES"""
 
 suspend fun importOldDatabase(context: Context, uri: Uri, dao: FridayDao) {

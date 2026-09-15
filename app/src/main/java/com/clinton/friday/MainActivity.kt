@@ -31,6 +31,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.util.concurrent.TimeUnit
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -51,7 +52,7 @@ class MainActivity : ComponentActivity() {
 
 const val CAPABILITIES = """What you can actually do right now (this is an early, in-progress rebuild of you as a real Android app):
 - Talk and hold a conversation
-- Remember past conversations, permanently, across app opens
+- Remember past conversations, permanently, across app opens, including recalling further back when needed
 
 What you cannot do yet (be honest about this, don't pretend otherwise):
 - You cannot yet send WhatsApp messages or place phone calls in this app version
@@ -67,6 +68,9 @@ You have light opinions and can disagree. If unsure what they mean, ask instead 
 
 IMPORTANT: Some messages in your memory history were imported from an older version of you that could call and text contacts. That old version no longer applies. In THIS current app, you cannot call or text yet - never claim, confirm, or repeat that you just made a call or sent a text, even if old memory messages describe it happening.
 $CAPABILITIES"""
+
+const val DEFAULT_HISTORY_LIMIT = 15
+const val DEEP_HISTORY_LIMIT = 300
 
 suspend fun importOldDatabase(context: Context, uri: Uri, dao: FridayDao) {
     val tempFile = File(context.cacheDir, "import_temp.db")
@@ -109,22 +113,18 @@ suspend fun importOldDatabase(context: Context, uri: Uri, dao: FridayDao) {
     prefs.edit().putBoolean("imported", true).apply()
 }
 
-fun askFriday(message: String, historyContext: String, prefsContext: String): String {
-    val client = OkHttpClient()
+fun callGemini(prompt: String): String? {
+    val client = OkHttpClient.Builder()
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .build()
     val apiKey = BuildConfig.GEMINI_API_KEY
     val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key=$apiKey"
-
-    var systemPrompt = SYSTEM_PROMPT
-    if (prefsContext.isNotBlank()) {
-        systemPrompt += "\n\nAdditional standing instructions and facts about Clinton that you must always remember:\n$prefsContext"
-    }
-
-    val fullPrompt = "$systemPrompt\n\nRecent conversation:\n$historyContext\n\nClinton: $message\nFriday:"
 
     val json = JSONObject().apply {
         put("contents", JSONArray().put(
             JSONObject().apply {
-                put("parts", JSONArray().put(JSONObject().put("text", fullPrompt)))
+                put("parts", JSONArray().put(JSONObject().put("text", prompt)))
             }
         ))
     }
@@ -135,7 +135,7 @@ fun askFriday(message: String, historyContext: String, prefsContext: String): St
 
     return try {
         client.newCall(request).execute().use { response ->
-            val responseBody = response.body?.string() ?: return "No response"
+            val responseBody = response.body?.string() ?: return null
             val parsed = JSONObject(responseBody)
             parsed.getJSONArray("candidates")
                 .getJSONObject(0)
@@ -145,8 +145,31 @@ fun askFriday(message: String, historyContext: String, prefsContext: String): St
                 .getString("text")
         }
     } catch (e: Exception) {
-        "Error reaching Friday: ${e.message}"
+        null
     }
+}
+
+fun needsDeepRecall(userMessage: String): Boolean {
+    val prompt = """Clinton just said this to Friday: "$userMessage"
+
+Does answering this well require Friday to recall something specific from POSSIBLY FAR BACK in past conversations rather than just the current flow of conversation?
+
+Answer YES for things like asking about past facts, "do you remember when...", personal details, past events, past decisions, or anything referencing something not in the immediate recent chat.
+Answer NO for normal conversation, greetings, new topics, or requests that don't need past context.
+
+Answer with ONLY one word: yes or no."""
+    val raw = callGemini(prompt)
+    return raw != null && raw.trim().lowercase().startsWith("yes")
+}
+
+fun askFriday(message: String, historyContext: String, prefsContext: String): String {
+    var systemPrompt = SYSTEM_PROMPT
+    if (prefsContext.isNotBlank()) {
+        systemPrompt += "\n\nAdditional standing instructions and facts about Clinton that you must always remember:\n$prefsContext"
+    }
+
+    val fullPrompt = "$systemPrompt\n\nRecent conversation:\n$historyContext\n\nClinton: $message\nFriday:"
+    return callGemini(fullPrompt) ?: "No response"
 }
 
 @Composable
@@ -195,6 +218,7 @@ fun ImportScreen(onPick: (Uri) -> Unit, onSkip: () -> Unit) {
 fun ChatScreen(dao: FridayDao) {
     val messages = remember { mutableStateListOf<String>() }
     var input by remember { mutableStateOf("") }
+    var thinking by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
 
@@ -205,7 +229,7 @@ fun ChatScreen(dao: FridayDao) {
     }
 
     LaunchedEffect(Unit) {
-        val history = withContext(Dispatchers.IO) { dao.getRecentMessages(15).reversed() }
+        val history = withContext(Dispatchers.IO) { dao.getRecentMessages(DEFAULT_HISTORY_LIMIT).reversed() }
         if (history.isEmpty()) {
             messages.add("Friday: Hello, I'm Friday.")
         } else {
@@ -222,6 +246,11 @@ fun ChatScreen(dao: FridayDao) {
                 items(messages) { msg ->
                     Text(text = msg, modifier = Modifier.padding(vertical = 4.dp))
                 }
+                if (thinking) {
+                    item {
+                        Text(text = "Friday is thinking...", modifier = Modifier.padding(vertical = 4.dp))
+                    }
+                }
             }
         }
         Row(
@@ -234,12 +263,17 @@ fun ChatScreen(dao: FridayDao) {
                     val userMessage = input
                     messages.add("You: $userMessage")
                     input = ""
+                    thinking = true
                     scope.launch {
                         val timestamp = System.currentTimeMillis().toString()
                         withContext(Dispatchers.IO) {
                             dao.insertMessage(MessageEntity(role = "user", content = userMessage, timestamp = timestamp))
                         }
-                        val historyRows = withContext(Dispatchers.IO) { dao.getRecentMessages(15).reversed() }
+
+                        val deep = withContext(Dispatchers.IO) { needsDeepRecall(userMessage) }
+                        val limit = if (deep) DEEP_HISTORY_LIMIT else DEFAULT_HISTORY_LIMIT
+
+                        val historyRows = withContext(Dispatchers.IO) { dao.getRecentMessages(limit).reversed() }
                         val historyContext = historyRows.joinToString("\n") { m ->
                             val speaker = if (m.role == "user") "Clinton" else "Friday"
                             "$speaker: ${m.content}"
@@ -248,6 +282,7 @@ fun ChatScreen(dao: FridayDao) {
                         val prefsContext = prefsRows.joinToString("\n") { "- ${it.instruction}" }
 
                         val reply = withContext(Dispatchers.IO) { askFriday(userMessage, historyContext, prefsContext) }
+                        thinking = false
                         messages.add("Friday: $reply")
                         withContext(Dispatchers.IO) {
                             dao.insertMessage(MessageEntity(role = "assistant", content = reply, timestamp = System.currentTimeMillis().toString()))

@@ -70,7 +70,7 @@ IMPORTANT: Some messages in your memory history were imported from an older vers
 $CAPABILITIES"""
 
 const val DEFAULT_HISTORY_LIMIT = 15
-const val DEEP_HISTORY_LIMIT = 300
+const val DEEP_HISTORY_LIMIT = 100000
 
 suspend fun importOldDatabase(context: Context, uri: Uri, dao: FridayDao) {
     val tempFile = File(context.cacheDir, "import_temp.db")

@@ -11,6 +11,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -153,7 +155,6 @@ fun AppRoot(dao: FridayDao) {
     val prefs = context.getSharedPreferences("friday_prefs", Context.MODE_PRIVATE)
     var imported by remember { mutableStateOf(prefs.getBoolean("imported", false)) }
     val scope = rememberCoroutineScope()
-
     if (!imported) {
         ImportScreen(onPick = { uri ->
             scope.launch {
@@ -195,6 +196,13 @@ fun ChatScreen(dao: FridayDao) {
     val messages = remember { mutableStateListOf<String>() }
     var input by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(messages.size) {
+        if (messages.isNotEmpty()) {
+            listState.animateScrollToItem(messages.size - 1)
+        }
+    }
 
     LaunchedEffect(Unit) {
         val history = withContext(Dispatchers.IO) { dao.getRecentMessages(15).reversed() }
@@ -210,7 +218,7 @@ fun ChatScreen(dao: FridayDao) {
 
     Column(modifier = Modifier.fillMaxSize().padding(12.dp)) {
         SelectionContainer(modifier = Modifier.weight(1f)) {
-            LazyColumn(modifier = Modifier.fillMaxWidth()) {
+            LazyColumn(modifier = Modifier.fillMaxWidth(), state = listState) {
                 items(messages) { msg ->
                     Text(text = msg, modifier = Modifier.padding(vertical = 4.dp))
                 }

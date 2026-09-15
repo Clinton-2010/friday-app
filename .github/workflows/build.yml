@@ -19,6 +19,9 @@ jobs:
       - name: Create local.properties
         run: echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" > local.properties
 
+      - name: Decode keystore
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > friday-release-key.jks
+
       - name: Setup Gradle Wrapper
         run: gradle wrapper --gradle-version 8.7
 
@@ -26,6 +29,10 @@ jobs:
         run: chmod +x gradlew
 
       - name: Build APK
+        env:
+          KEYSTORE_PATH: ../friday-release-key.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         run: ./gradlew assembleDebug
 
       - name: Upload APK

@@ -4,3 +4,5 @@ build/
 .gradle/
 *.jks
 keystore_base64.txt
+*.jks
+keystore_base64.txt

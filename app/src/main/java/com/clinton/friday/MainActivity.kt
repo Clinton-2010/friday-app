@@ -76,6 +76,8 @@ Speak only in English by default. Do not use Igbo or any other language unless C
 You have light opinions and can disagree. If unsure what they mean, ask instead of guessing. You always respect Clinton's control over you. Keep replies conversational, not long.
 
 IMPORTANT: Some messages in your memory history were imported from an older version of you. That old version could do things (like phone calls) this current app version cannot yet. Only claim abilities listed in your capabilities below - never claim or confirm an action from your capability list's "cannot do" section, even if old memory messages describe it happening.
+
+CRITICAL: Sending a WhatsApp message or making a call only actually happens through your app's own confirmed action u2014 never through your own conversational reply. If Clinton asks you to text or call someone, do NOT say "I sent it" or "message fired off" yourself in a normal reply. Only the app's built-in confirmation counts as a real sent message.
 $CAPABILITIES"""
 
 const val DEFAULT_HISTORY_LIMIT = 15
@@ -391,18 +393,27 @@ fun ChatScreen(dao: FridayDao) {
                         val currentPendingMsg = pendingMessage
 
                         if (currentPending != null && currentPendingMsg != null) {
-                            val choice = userMessage.trim()
+                            val choice = userMessage.trim().lowercase()
+                            val ordinalMap = mapOf(
+                                "first" to 1, "1st" to 1,
+                                "second" to 2, "2nd" to 2,
+                                "third" to 3, "3rd" to 3,
+                                "fourth" to 4, "4th" to 4,
+                                "fifth" to 5, "5th" to 5
+                            )
                             val index = choice.toIntOrNull()
+                                ?: ordinalMap.entries.firstOrNull { choice.contains(it.key) }?.value
+                                ?: if (choice.contains("last")) currentPending.size else null
+
                             val chosen = if (index != null && index in 1..currentPending.size) {
                                 currentPending[index - 1]
                             } else {
-                                currentPending.firstOrNull { it.name.lowercase().contains(choice.lowercase()) }
+                                currentPending.firstOrNull { it.name.lowercase().contains(choice) }
                             }
 
-                            pendingContacts = null
-                            pendingMessage = null
-
                             if (chosen != null) {
+                                pendingContacts = null
+                                pendingMessage = null
                                 if (!hasContactsPermission) {
                                     val reply = "I need contacts permission to do that, boss. Try allowing it in your phone settings."
                                     messages.add("Friday: $reply")
@@ -418,7 +429,8 @@ fun ChatScreen(dao: FridayDao) {
                                     }
                                 }
                             } else {
-                                val reply = "Didn't catch which one you meant, boss. Want to try naming the contact again?"
+                                val names = currentPending.mapIndexed { i, c -> (i + 1).toString() + ". " + c.name }.joinToString("\n")
+                                val reply = "Didn't catch which one, boss. Reply with a number:\n" + names
                                 messages.add("Friday: $reply")
                                 withContext(Dispatchers.IO) {
                                     dao.insertMessage(MessageEntity(role = "assistant", content = reply, timestamp = System.currentTimeMillis().toString()))

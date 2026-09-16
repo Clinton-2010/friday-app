@@ -358,21 +358,6 @@ fun ChatScreen(dao: FridayDao) {
         }
     }
 
-    fun saveAndShow(userMsg: String?, fridayMsg: String) {
-        scope.launch {
-            if (userMsg != null) {
-                messages.add("You: $userMsg")
-                withContext(Dispatchers.IO) {
-                    dao.insertMessage(MessageEntity(role = "user", content = userMsg, timestamp = System.currentTimeMillis().toString()))
-                }
-            }
-            messages.add("Friday: $fridayMsg")
-            withContext(Dispatchers.IO) {
-                dao.insertMessage(MessageEntity(role = "assistant", content = fridayMsg, timestamp = System.currentTimeMillis().toString()))
-            }
-        }
-    }
-
     Column(modifier = Modifier.fillMaxSize().padding(12.dp)) {
         SelectionContainer(modifier = Modifier.weight(1f)) {
             LazyColumn(modifier = Modifier.fillMaxWidth(), state = listState) {
@@ -426,7 +411,7 @@ fun ChatScreen(dao: FridayDao) {
                                     }
                                 } else {
                                     openWhatsApp(context, chosen.number, currentPendingMsg)
-                                    val reply = "Opened WhatsApp for ${chosen.name} with your message ready \u2014 just tap send."
+                                    val reply = "Opened WhatsApp for " + chosen.name + " with your message ready, just tap send."
                                     messages.add("Friday: $reply")
                                     withContext(Dispatchers.IO) {
                                         dao.insertMessage(MessageEntity(role = "assistant", content = reply, timestamp = System.currentTimeMillis().toString()))
@@ -444,5 +429,71 @@ fun ChatScreen(dao: FridayDao) {
 
                         thinking = true
                         val textCommand = withContext(Dispatchers.IO) { detectTextCommand(userMessage) }
+                        val isTextCmd = textCommand.isTextCommand
+                        val cmdName = textCommand.name
+                        val cmdMessage = textCommand.message
 
-                        if (textCommand.isTextCommand && textCommand.name != null && textCommand
+                        if (isTextCmd && cmdName != null && cmdMessage != null) {
+                            if (!hasContactsPermission) {
+                                thinking = false
+                                val reply = "I'd need contacts permission to text anyone, boss. Try allowing it in your phone settings and ask again."
+                                messages.add("Friday: $reply")
+                                withContext(Dispatchers.IO) {
+                                    dao.insertMessage(MessageEntity(role = "assistant", content = reply, timestamp = System.currentTimeMillis().toString()))
+                                }
+                            } else {
+                                val contacts = withContext(Dispatchers.IO) { getAllContacts(context) }
+                                val matches = withContext(Dispatchers.IO) { findMatchingContacts(cmdName, contacts) }
+                                thinking = false
+
+                                if (matches.isEmpty()) {
+                                    val reply = "I couldn't find anyone named " + cmdName + " in your contacts, boss."
+                                    messages.add("Friday: $reply")
+                                    withContext(Dispatchers.IO) {
+                                        dao.insertMessage(MessageEntity(role = "assistant", content = reply, timestamp = System.currentTimeMillis().toString()))
+                                    }
+                                } else if (matches.size == 1) {
+                                    openWhatsApp(context, matches[0].number, cmdMessage)
+                                    val reply = "Opened WhatsApp for " + matches[0].name + " with your message ready, just tap send."
+                                    messages.add("Friday: $reply")
+                                    withContext(Dispatchers.IO) {
+                                        dao.insertMessage(MessageEntity(role = "assistant", content = reply, timestamp = System.currentTimeMillis().toString()))
+                                    }
+                                } else {
+                                    pendingContacts = matches
+                                    pendingMessage = cmdMessage
+                                    val names = matches.mapIndexed { i, c -> (i + 1).toString() + ". " + c.name }.joinToString("\n")
+                                    val reply = "I found a few contacts that could match " + cmdName + ":\n" + names + "\nWhich one, boss?"
+                                    messages.add("Friday: $reply")
+                                    withContext(Dispatchers.IO) {
+                                        dao.insertMessage(MessageEntity(role = "assistant", content = reply, timestamp = System.currentTimeMillis().toString()))
+                                    }
+                                }
+                            }
+                        } else {
+                            val deep = withContext(Dispatchers.IO) { needsDeepRecall(userMessage) }
+                            val limit = if (deep) DEEP_HISTORY_LIMIT else DEFAULT_HISTORY_LIMIT
+
+                            val historyRows = withContext(Dispatchers.IO) { dao.getRecentMessages(limit).reversed() }
+                            val historyContext = historyRows.joinToString("\n") { m ->
+                                val speaker = if (m.role == "user") "Clinton" else "Friday"
+                                "$speaker: ${m.content}"
+                            }
+                            val prefsRows = withContext(Dispatchers.IO) { dao.getAllPreferences() }
+                            val prefsContext = prefsRows.joinToString("\n") { "- ${it.instruction}" }
+
+                            val reply = withContext(Dispatchers.IO) { askFriday(userMessage, historyContext, prefsContext) }
+                            thinking = false
+                            messages.add("Friday: $reply")
+                            withContext(Dispatchers.IO) {
+                                dao.insertMessage(MessageEntity(role = "assistant", content = reply, timestamp = System.currentTimeMillis().toString()))
+                            }
+                        }
+                    }
+                }
+            }) {
+                Text("Send")
+            }
+        }
+    }
+}
